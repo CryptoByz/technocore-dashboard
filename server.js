@@ -29,6 +29,7 @@ const {
 
 const { parseA2AEvent } = require('./src/tclk');
 
+const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3010;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
@@ -59,11 +60,25 @@ app.use('/api/', (req, res, next) => {
 });
 
 // Admin Token Guard — checks x-admin-token header
+//
+// Comparison was `!==`, which returns as soon as the first byte differs and therefore leaks
+// the token length and prefix through response timing. timingSafeEqual needs equal lengths, so
+// the length is checked separately and a dummy comparison is still performed on mismatch.
+function adminTokenMatches(presented) {
+  const a = Buffer.from(String(presented === undefined || presented === null ? '' : presented), 'utf8');
+  const b = Buffer.from(String(ADMIN_TOKEN || ''), 'utf8');
+  if (a.length !== b.length) {
+    crypto.timingSafeEqual(a, a);
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
+}
+
 function requireAdmin(req, res, next) {
   if (!ADMIN_TOKEN) {
     return res.status(503).json({ error: 'Admin token not configured on server.' });
   }
-  if (req.headers['x-admin-token'] !== ADMIN_TOKEN) {
+  if (!adminTokenMatches(req.headers['x-admin-token'])) {
     return res.status(403).json({ error: 'Forbidden.' });
   }
   next();
@@ -210,15 +225,19 @@ app.get('/api/agent/identity', (req, res) => {
 });
 
 // 7. Agent Message Sender (Playground & Client)
-app.post('/api/agent/send', async (req, res) => {
+app.post('/api/agent/send', requireAdmin, async (req, res) => {
   try {
-    const { room, text, signed = true, nick = 'operator', jwk = null, did = null } = req.body;
+    // `jwk` and `did` are no longer accepted from the request. They were: any caller could post
+    // a message signed with the server's own AGENT_PRIVATE_KEY_JWK under a DID of their choosing,
+    // which is identity impersonation on the platform. The key and DID now come from the
+    // server environment only.
+    const { room, text, signed = true, nick = 'operator' } = req.body || {};
     if (!room || !text) {
       return res.status(400).json({ error: 'Room and text are required' });
     }
 
     if (signed) {
-      const result = await signAndPostMessage(room, text, jwk, did);
+      const result = await signAndPostMessage(room, text);
       return res.json(result);
     } else {
       const result = await postUnsignedMessage(room, nick, text);
@@ -246,6 +265,11 @@ app.post('/api/agent/kv', async (req, res) => {
       const result = await setKv(namespace, key, value || '', ifExpected);
       return res.json(result);
     } else {
+      // Reading was unauthenticated while writing required the admin token. Namespace and key
+      // are fully caller-controlled, so this exposed the upstream KV store to enumeration.
+      if (!ADMIN_TOKEN || !adminTokenMatches(req.headers['x-admin-token'])) {
+        return res.status(403).json({ error: 'Forbidden: KV read requires admin token.' });
+      }
       const val = await readKv(namespace, key);
       return res.json({ namespace, key, value: val, found: val !== null });
     }

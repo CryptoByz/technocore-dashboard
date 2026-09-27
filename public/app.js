@@ -353,7 +353,18 @@ function initLanguageSwitcher() {
 
 // ── 1. SESSION & AUTH MANAGEMENT ──────────────────────
 function initSession() {
-  const saved = localStorage.getItem('technocore_agent_session');
+  // Read the legacy localStorage entry once, migrate it to sessionStorage and remove it, so a
+  // key already at rest on disk is not left behind after this upgrade.
+  let saved = sessionStorage.getItem('technocore_agent_session');
+  if (!saved) {
+    const legacy = localStorage.getItem('technocore_agent_session');
+    if (legacy) {
+      sessionStorage.setItem('technocore_agent_session', legacy);
+      localStorage.removeItem('technocore_agent_session');
+      saved = legacy;
+      console.warn('[auth] Migrated the agent session out of localStorage.');
+    }
+  }
   if (saved) {
     try {
       userSession = JSON.parse(saved);
@@ -373,11 +384,11 @@ function updateAuthUI() {
     const shortDid = `${userSession.did.slice(0, 10)}...${userSession.did.slice(-6)}`;
     container.innerHTML = `
       <div class="auth-logged-in">
-        <div class="agent-badge" title="${userSession.did}">
+        <div class="agent-badge" title="${escapeHtml(userSession.did)}">
           <span class="agent-icon">⚡</span>
           <div class="agent-info">
             <div class="agent-label">${t('nav_logged_in_label')}</div>
-            <div class="agent-did">${shortDid}</div>
+            <div class="agent-did">${escapeHtml(shortDid)}</div>
           </div>
         </div>
         <button class="disconnect-btn" id="logoutBtn" title="${t('nav_logout_btn')}">${t('nav_logout_btn')}</button>
@@ -440,7 +451,15 @@ function loginWithKeyData(keyData) {
   }
 
   userSession = { did, jwk };
-  localStorage.setItem('technocore_agent_session', JSON.stringify(userSession));
+  // The session holds the Ed25519 private key JWK. It was persisted to localStorage, which any
+  // script on the origin can read - so any XSS here exfiltrated the signing key, not just a
+  // display name. sessionStorage is used instead: same-origin scripts can still read it, but it
+  // does not survive a browser restart, which narrows the exposure window considerably.
+  try {
+    sessionStorage.setItem('technocore_agent_session', JSON.stringify(userSession));
+  } catch (e) {
+    console.warn('Could not persist agent session:', e && e.message);
+  }
   updateAuthUI();
   closeModal();
 
@@ -451,6 +470,7 @@ function loginWithKeyData(keyData) {
 
 function logoutUser() {
   userSession = null;
+  sessionStorage.removeItem('technocore_agent_session');
   localStorage.removeItem('technocore_agent_session');
   updateAuthUI();
   selectRoom(currentRoom);
@@ -623,12 +643,12 @@ function renderRoomList(rooms) {
     const idleText = idleMins < 1 ? t('room_just_now') : `${idleMins}${unitMin} ${t('room_idle_suffix')}`;
 
     return `
-      <div class="room-item ${isSelected}" onclick="selectRoom('${r.room}')">
+      <div class="room-item ${isSelected}" onclick="selectRoom('${jsArg(r.room)}')">
         <div class="room-item-top">
-          <span class="room-item-name">#${r.room}</span>
+          <span class="room-item-name">#${escapeHtml(r.room)}</span>
           <span class="room-item-seq">seq:${r.last_seq?.toLocaleString() || 0}</span>
         </div>
-        <div class="room-item-sub">${r.topic || t('room_topic_none')}</div>
+        <div class="room-item-sub">${escapeHtml(r.topic || t('room_topic_none'))}</div>
         <div class="room-item-meta">
           <div>${tag}</div>
           <span>${idleText} · Div: ${((r.nick_diversity || 0) * 100).toFixed(0)}%</span>
@@ -698,7 +718,7 @@ function renderMessages(messages) {
         <div class="msg-body">${escapeHtml(m.text)}</div>
         <div class="msg-footer">
           <div>${dealBadge}</div>
-          <button class="icon-btn" onclick="copyText('${escapeQuotes(m.text)}')" title="${t('text_copied')}">📋</button>
+          <button class="icon-btn" onclick="copyText('${jsArg(m.text)}')" title="${t('text_copied')}">📋</button>
         </div>
       </div>
     `;
@@ -1352,9 +1372,35 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
+// escapeQuotes only handled quotes, and was being used inside an HTML attribute. That does not
+// work: the HTML parser decodes entities before the JS parser sees the value, so a `"` in the
+// data closes the attribute regardless of how it was escaped. Kept for compatibility, but new
+// inline-handler call sites use jsArg() below.
 function escapeQuotes(str) {
   if (!str) return '';
   return str.replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+
+// Escape a value for a single-quoted JavaScript string literal that is itself embedded in a
+// double-quoted HTML attribute, e.g. onclick="f('VALUE')".
+//
+// This is the escaping that inline handlers actually need: the quote and backslash have to be
+// escaped for the JS parser, and < > & have to be unicode-escaped so the sequence can never
+// terminate the surrounding attribute. escapeHtml() is not sufficient because &#039; is decoded
+// back to a quote before the JS parser runs.
+function jsArg(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\"')
+    .replace(/`/g, '\\`')
+    .replace(/\$/g, '\\\$')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026');
 }
 
 function copyText(text) {

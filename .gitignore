@@ -2,3 +2,6 @@
 *.env
 node_modules/
 .DS_Store
+
+# Also ignore backup variants of the env file
+.env.*

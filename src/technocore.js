@@ -54,18 +54,15 @@ async function fetchRoomMessages(room, limit = 50, since = null, wait = null) {
   }
 }
 
-async function signAndPostMessage(room, text, customJwk = null, customDid = null) {
-  let activeKey = agentPrivateKey;
-  let activeDid = AGENT_DID;
-
-  if (customJwk && customDid) {
-    try {
-      activeKey = crypto.createPrivateKey({ key: customJwk, format: 'jwk' });
-      activeDid = customDid;
-    } catch (err) {
-      throw new Error(`Geçersiz JWK anahtar formatı: ${err.message}`);
-    }
-  }
+// Signs with the server's own agent identity only.
+//
+// This function used to accept a caller-supplied JWK and DID, which meant any client could have
+// the server sign a message under an arbitrary identity - impersonation, and an injection point
+// for arbitrary private-key material through createPrivateKey. The key and DID are resolved
+// from the environment, never from a caller.
+async function signAndPostMessage(room, text) {
+  const activeKey = agentPrivateKey;
+  const activeDid = AGENT_DID;
 
   if (!activeKey || !activeDid) {
     throw new Error('Ajan kimliği veya private key bulunamadı. Lütfen .json dosyanızla giriş yapın.');

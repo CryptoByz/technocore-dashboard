@@ -144,7 +144,10 @@ function getMessagesForDid(did) {
       room: m.room,
       text: m.text,
       title: m.dealTitle || (m.text ? m.text.slice(0, 60) : 'Signed Message'),
-      status: 'VERIFIED (Ed25519)'
+      // The signature is not verified anywhere in this project - no crypto.verify call exists -
+      // so labelling these rows "VERIFIED" asserted a guarantee the code does not make. The
+      // status now says what is actually true: the upstream reported the message as signed.
+      status: 'SIGNED (unverified)'
     }));
 }
 
